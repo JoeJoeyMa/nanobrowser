@@ -1007,17 +1007,32 @@ export default class Page {
     }
   }
 
-  async clickElementNode(useVision: boolean, elementNode: DOMElementNode): Promise<void> {
+  async clickElementNode(
+    useVision: boolean,
+    elementNode: DOMElementNode,
+  ): Promise<{
+    url: string;
+    frameUrl: string;
+    xpath: string | null;
+    cssSelector: string;
+    elementTag: string;
+    elementText: string;
+    screenshot: string | null;
+  }> {
     if (!this._puppeteerPage) {
       throw new Error('Puppeteer is not connected');
     }
 
+    let elementInfo: {
+      url: string;
+      frameUrl: string;
+      xpath: string | null;
+      cssSelector: string;
+      elementTag: string;
+      elementText: string;
+      screenshot: string | null;
+    };
     try {
-      // Highlight before clicking
-      // if (elementNode.highlightIndex !== null) {
-      //   await this._updateState(useVision, elementNode.highlightIndex);
-      // }
-
       const element = await this.locateElement(elementNode);
       if (!element) {
         throw new Error(`Element: ${elementNode} not found`);
@@ -1025,6 +1040,25 @@ export default class Page {
 
       // Scroll element into view if needed
       await this._scrollIntoViewIfNeeded(element);
+
+      // 收集详细信息
+      // 获取 frameUrl
+      let frameUrl = this.url();
+      try {
+        frameUrl = await element.evaluate(() => window.location.href);
+      } catch (e) {
+        // fallback to page url
+        frameUrl = this.url();
+      }
+      elementInfo = {
+        url: this.url(),
+        frameUrl,
+        xpath: elementNode.xpath,
+        cssSelector: elementNode.enhancedCssSelectorForElement(this._config.includeDynamicAttributes),
+        elementTag: await element.evaluate(el => el.tagName),
+        elementText: await element.evaluate(el => (el as HTMLElement).innerText || ''),
+        screenshot: await this.takeScreenshotOfElement(element),
+      };
 
       try {
         // First attempt: Use Puppeteer's click method with timeout
@@ -1034,16 +1068,13 @@ export default class Page {
         ]);
         await this._checkAndHandleNavigation();
       } catch (error) {
-        // if URLNotAllowedError, throw it
         if (error instanceof URLNotAllowedError) {
           throw error;
         }
-        // Second attempt: Use evaluate to perform a direct click
         logger.info('Failed to click element, trying again', error);
         try {
           await element.evaluate(el => (el as HTMLElement).click());
         } catch (secondError) {
-          // if URLNotAllowedError, throw it
           if (secondError instanceof URLNotAllowedError) {
             throw secondError;
           }
@@ -1052,10 +1083,32 @@ export default class Page {
           );
         }
       }
+      // 返回详细操作信息
+      return elementInfo;
     } catch (error) {
       throw new Error(
         `Failed to click element: ${elementNode}. Error: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+  }
+
+  /**
+   * 截图指定元素
+   */
+  async takeScreenshotOfElement(element: ElementHandle): Promise<string | null> {
+    try {
+      const boundingBox = await element.boundingBox();
+      if (!boundingBox) return null;
+      const screenshot = await this._puppeteerPage!.screenshot({
+        clip: boundingBox,
+        encoding: 'base64',
+        type: 'jpeg',
+        quality: 80,
+      });
+      return screenshot as string;
+    } catch (e) {
+      logger.error('Failed to take element screenshot:', e);
+      return null;
     }
   }
 

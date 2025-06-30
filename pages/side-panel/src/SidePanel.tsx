@@ -36,6 +36,8 @@ const SidePanel = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessingSpeech, setIsProcessingSpeech] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
+  const [isRecordingManual, setIsRecordingManual] = useState(false);
+  const [recordedLogs, setRecordedLogs] = useState<any[]>([]);
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
@@ -1004,6 +1006,78 @@ const SidePanel = () => {
     }
   };
 
+  // 注入内容脚本并发送录制控制消息
+  const sendRecorderToggle = async (enabled: boolean) => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/index.iife.js'],
+    });
+    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled });
+  };
+
+  // 开始录制
+  const handleStartRecording = async () => {
+    setIsRecordingManual(true);
+    setRecordedLogs([]);
+    // 注入内容脚本并开启录制
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/index.iife.js'],
+    });
+    window.addEventListener('message', handleRecorderLogEvent);
+    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled: true });
+  };
+
+  // 停止录制
+  const handleStopRecording = async () => {
+    setIsRecordingManual(false);
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled: false });
+    window.removeEventListener('message', handleRecorderLogEvent);
+  };
+
+  // 导出录制日志
+  const handleExportRecordedLogs = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+    // 请求内容脚本导出日志
+    window.addEventListener('message', handleRecorderExportResult);
+    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_EXPORT' });
+  };
+
+  // 监听内容脚本日志事件
+  const handleRecorderLogEvent = (event: MessageEvent) => {
+    if (event.data && event.data.type === 'NANO_RECORDER_LOG') {
+      setRecordedLogs(prev => [...prev, event.data.log]);
+    }
+  };
+
+  // 监听内容脚本导出结果
+  const handleRecorderExportResult = (event: MessageEvent) => {
+    if (event.data && event.data.type === 'NANO_RECORDER_EXPORT_RESULT') {
+      const pretty = JSON.stringify(event.data.logs, null, 2);
+      const blob = new Blob([pretty], { type: 'application/json' });
+      saveAs(blob, `manual_operation_logs.json`);
+    }
+  };
+
+  useEffect(() => {
+    function handleExportResult(msg) {
+      if (msg && msg.type === 'NANO_RECORDER_EXPORT_RESULT') {
+        const pretty = JSON.stringify(msg.logs, null, 2);
+        const blob = new Blob([pretty], { type: 'application/json' });
+        saveAs(blob, `manual_operation_logs.json`);
+      }
+    }
+    chrome.runtime.onMessage.addListener(handleExportResult);
+    return () => chrome.runtime.onMessage.removeListener(handleExportResult);
+  }, []);
+
   return (
     <div>
       <div
@@ -1070,6 +1144,36 @@ const SidePanel = () => {
               tabIndex={0}>
               导出操作日志
             </button>
+            {/* 手动录制控制按钮 */}
+            {!isRecordingManual ? (
+              <button
+                type="button"
+                onClick={handleStartRecording}
+                className={`header-icon ${isDarkMode ? 'text-green-400 hover:text-green-300' : 'text-green-600 hover:text-green-700'} cursor-pointer`}
+                aria-label="Start Manual Recording"
+                tabIndex={0}>
+                开始录制
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={handleStopRecording}
+                  className={`header-icon ${isDarkMode ? 'text-red-400 hover:text-red-300' : 'text-red-600 hover:text-red-700'} cursor-pointer`}
+                  aria-label="Stop Manual Recording"
+                  tabIndex={0}>
+                  停止录制
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportRecordedLogs}
+                  className={`header-icon ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'} cursor-pointer`}
+                  aria-label="Export Manual Operation Logs"
+                  tabIndex={0}>
+                  导出录制日志
+                </button>
+              </>
+            )}
           </div>
         </header>
         {showHistory ? (

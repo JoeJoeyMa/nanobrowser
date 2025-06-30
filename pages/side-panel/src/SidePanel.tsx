@@ -12,6 +12,7 @@ import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
 import './SidePanel.css';
+import { saveAs } from 'file-saver';
 
 // Declare chrome API types
 declare global {
@@ -972,6 +973,37 @@ const SidePanel = () => {
     }
   };
 
+  // 日志导出函数
+  const handleExportLogs = async () => {
+    if (!currentSessionId) {
+      alert('请先选择一个会话');
+      return;
+    }
+    try {
+      // 加载 agent step history
+      const historyData = await chatHistoryStore.loadAgentStepHistory(currentSessionId);
+      if (!historyData || !historyData.history) {
+        alert('当前会话没有操作日志');
+        return;
+      }
+      // 解析为 JSON
+      let logs;
+      try {
+        logs = JSON.parse(historyData.history);
+      } catch (e) {
+        alert('日志解析失败');
+        return;
+      }
+      // 美化 JSON
+      const pretty = JSON.stringify(logs, null, 2);
+      // 触发下载
+      const blob = new Blob([pretty], { type: 'application/json' });
+      saveAs(blob, `operation_logs_${currentSessionId}.json`);
+    } catch (e) {
+      alert('导出日志失败: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   return (
     <div>
       <div
@@ -1028,6 +1060,15 @@ const SidePanel = () => {
               aria-label="Settings"
               tabIndex={0}>
               <FiSettings size={20} />
+            </button>
+            {/* 日志导出按钮 */}
+            <button
+              type="button"
+              onClick={handleExportLogs}
+              className={`header-icon ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'} cursor-pointer`}
+              aria-label="Export Operation Logs"
+              tabIndex={0}>
+              导出操作日志
             </button>
           </div>
         </header>

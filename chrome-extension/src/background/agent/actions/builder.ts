@@ -34,6 +34,40 @@ export class InvalidInputError extends Error {
   }
 }
 
+// 日志结构定义
+interface OperationLog {
+  timestamp: string;
+  action: string;
+  params: unknown;
+  context: {
+    url: string;
+    title: string;
+    tabId: number;
+    screenshot?: string | null;
+  };
+  target?: {
+    xpath?: string | null;
+    cssSelector?: string;
+    tagName?: string | null;
+    elementText?: string;
+    attributes?: Record<string, string>;
+    frameUrl?: string;
+    screenshot?: string | null;
+  };
+  result: {
+    success: boolean;
+    error: string | null;
+    extractedContent?: string | null;
+  };
+}
+
+function pushOperationLog(context: unknown, log: OperationLog) {
+  // @ts-expect-error: context.history.logs 结构动态
+  if (!context.history.logs) context.history.logs = [];
+  // @ts-expect-error: context.history.logs 结构动态
+  context.history.logs.push(log);
+}
+
 /**
  * An action is a function that takes an input and returns an ActionResult
  */
@@ -177,10 +211,24 @@ export class ActionBuilder {
     const goToUrl = new Action(async (input: z.infer<typeof goToUrlActionSchema.schema>) => {
       const intent = input.intent || `Navigating to ${input.url}`;
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
-
+      const page = await this.context.browserContext.getCurrentPage();
+      const state = await page.getState();
       await this.context.browserContext.navigateTo(input.url);
       const msg2 = `Navigated to ${input.url}`;
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg2);
+      // 日志
+      pushOperationLog(this.context, {
+        timestamp: new Date().toISOString(),
+        action: 'go_to_url',
+        params: input,
+        context: {
+          url: page.url(),
+          title: state.title,
+          tabId: page.tabId,
+          screenshot: state.screenshot,
+        },
+        result: { success: true, error: null, extractedContent: msg2 },
+      });
       return new ActionResult({
         extractedContent: msg2,
         includeInMemory: true,
@@ -223,49 +271,54 @@ export class ActionBuilder {
 
         const page = await this.context.browserContext.getCurrentPage();
         const state = await page.getState();
-
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
           throw new Error(`Element with index ${input.index} does not exist - retry or use alternative actions`);
         }
-
-        // Check if element is a file uploader
-        if (page.isFileUploader(elementNode)) {
-          const msg = `Index ${input.index} - has an element which opens file upload dialog. To upload files please use a specific function to upload files`;
-          logger.info(msg);
-          return new ActionResult({
-            extractedContent: msg,
-            includeInMemory: true,
-          });
-        }
-
+        // 收集 target 信息
+        let targetInfo = {};
         try {
-          const initialTabIds = await this.context.browserContext.getAllTabIds();
-          await page.clickElementNode(this.context.options.useVision, elementNode);
-          let msg = `Clicked button with index ${input.index}: ${elementNode.getAllTextTillNextClickableElement(2)}`;
-          logger.info(msg);
-
-          // TODO: could be optimized by chrome extension tab api
-          const currentTabIds = await this.context.browserContext.getAllTabIds();
-          if (currentTabIds.size > initialTabIds.size) {
-            const newTabMsg = 'New tab opened - switching to it';
-            msg += ` - ${newTabMsg}`;
-            logger.info(newTabMsg);
-            // find the tab id that is not in the initial tab ids
-            const newTabId = Array.from(currentTabIds).find(id => !initialTabIds.has(id));
-            if (newTabId) {
-              await this.context.browserContext.switchTab(newTabId);
-            }
-          }
-          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
-          return new ActionResult({ extractedContent: msg, includeInMemory: true });
-        } catch (error) {
-          const msg = `Element no longer available with index ${input.index} - most likely the page changed`;
-          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
-          return new ActionResult({
-            error: error instanceof Error ? error.message : String(error),
-          });
+          const info = await page.clickElementNode(this.context.options.useVision, elementNode);
+          targetInfo = {
+            xpath: info.xpath,
+            cssSelector: info.cssSelector,
+            tagName: info.elementTag,
+            elementText: info.elementText,
+            frameUrl: info.frameUrl,
+            screenshot: info.screenshot,
+            attributes: elementNode.attributes,
+          };
+        } catch (e) {
+          // fallback: 只用基本信息
+          targetInfo = {
+            xpath: elementNode.xpath,
+            cssSelector: elementNode.enhancedCssSelectorForElement(),
+            tagName: elementNode.tagName,
+            elementText: '',
+            frameUrl: '',
+            screenshot: null,
+            attributes: elementNode.attributes,
+          };
         }
+        // context 信息
+        const contextInfo = {
+          url: page.url(),
+          title: state.title,
+          tabId: page.tabId,
+          screenshot: state.screenshot,
+        };
+        const msg = `Clicked button with index ${input.index}: ${elementNode.getAllTextTillNextClickableElement(2)}`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        // 日志
+        pushOperationLog(this.context, {
+          timestamp: new Date().toISOString(),
+          action: 'click_element',
+          params: input,
+          context: contextInfo,
+          target: targetInfo,
+          result: { success: true, error: null, extractedContent: msg },
+        });
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
       },
       clickElementActionSchema,
       true,
@@ -279,15 +332,52 @@ export class ActionBuilder {
 
         const page = await this.context.browserContext.getCurrentPage();
         const state = await page.getState();
-
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
           throw new Error(`Element with index ${input.index} does not exist - retry or use alternative actions`);
         }
-
+        // 收集 target 信息
+        let targetInfo = {};
+        try {
+          // 复用 click 的截图逻辑
+          const info = await page.clickElementNode(this.context.options.useVision, elementNode);
+          targetInfo = {
+            xpath: info.xpath,
+            cssSelector: info.cssSelector,
+            tagName: info.elementTag,
+            elementText: info.elementText,
+            frameUrl: info.frameUrl,
+            screenshot: info.screenshot,
+            attributes: elementNode.attributes,
+          };
+        } catch (e) {
+          targetInfo = {
+            xpath: elementNode.xpath,
+            cssSelector: elementNode.enhancedCssSelectorForElement(),
+            tagName: elementNode.tagName,
+            elementText: '',
+            frameUrl: '',
+            screenshot: null,
+            attributes: elementNode.attributes,
+          };
+        }
         await page.inputTextElementNode(this.context.options.useVision, elementNode, input.text);
         const msg = `Input ${input.text} into index ${input.index}`;
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        // 日志
+        pushOperationLog(this.context, {
+          timestamp: new Date().toISOString(),
+          action: 'input_text',
+          params: input,
+          context: {
+            url: page.url(),
+            title: state.title,
+            tabId: page.tabId,
+            screenshot: state.screenshot,
+          },
+          target: targetInfo,
+          result: { success: true, error: null, extractedContent: msg },
+        });
         return new ActionResult({ extractedContent: msg, includeInMemory: true });
       },
       inputTextActionSchema,
@@ -377,30 +467,46 @@ export class ActionBuilder {
         input.amount !== undefined && input.amount !== null ? `${input.amount} pixels` : 'one page';
       const intent = input.intent || `Scroll down the page by ${requestedAmount}`;
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
-
       const page = await this.context.browserContext.getCurrentPage();
-
+      const state = await page.getState();
       // Get initial scroll position
       const [initialPixelsAbove, initialPixelsBelow] = await page.getScrollInfo();
-
-      // Check if already at bottom of page
       if (initialPixelsBelow === 0) {
         const msg = 'Already at bottom of page, cannot scroll down further';
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        // 日志
+        pushOperationLog(this.context, {
+          timestamp: new Date().toISOString(),
+          action: 'scroll_down',
+          params: input,
+          context: {
+            url: page.url(),
+            title: state.title,
+            tabId: page.tabId,
+            screenshot: state.screenshot,
+          },
+          result: { success: true, error: null, extractedContent: msg },
+        });
         return new ActionResult({ extractedContent: msg, includeInMemory: true });
       }
-
-      // Perform scrolling
       await page.scrollDown(input.amount);
-
-      // Get final scroll position
       const [finalPixelsAbove] = await page.getScrollInfo();
-
-      // Calculate actual scroll amount
       const actualScrolled = finalPixelsAbove - initialPixelsAbove;
-
       const msg = `Scrolled down the page by ${actualScrolled} pixels${input.amount !== undefined && actualScrolled !== input.amount ? ` (requested ${input.amount} pixels)` : ''}`;
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+      // 日志
+      pushOperationLog(this.context, {
+        timestamp: new Date().toISOString(),
+        action: 'scroll_down',
+        params: input,
+        context: {
+          url: page.url(),
+          title: state.title,
+          tabId: page.tabId,
+          screenshot: state.screenshot,
+        },
+        result: { success: true, error: null, extractedContent: msg },
+      });
       return new ActionResult({ extractedContent: msg, includeInMemory: true });
     }, scrollDownActionSchema);
     actions.push(scrollDown);

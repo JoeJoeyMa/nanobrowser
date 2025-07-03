@@ -19,12 +19,14 @@ import {
   previousPageActionSchema,
   scrollToPercentActionSchema,
   nextPageActionSchema,
+  buildDomTreeActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
 import { ExecutionState, Actors } from '../event/types';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { wrapUntrustedContent } from '../messages/utils';
+import { _buildDomTree } from '@src/background/browser/dom/service';
 
 const logger = createLogger('Action');
 
@@ -803,6 +805,40 @@ export class ActionBuilder {
       true,
     );
     actions.push(selectDropdownOption);
+
+    // 注册 build_dom_tree action
+    const buildDomTree = new Action(async (input: z.infer<typeof buildDomTreeActionSchema.schema>) => {
+      // 触发 dom tree 构建
+      const [elementTree, selectorMap] = await _buildDomTree(
+        input.tabId,
+        input.url,
+        input.showHighlightElements,
+        input.focusElement,
+        input.viewportExpansion,
+        input.debugMode ?? false,
+      );
+      // 日志
+      pushOperationLog(this.context, {
+        timestamp: new Date().toISOString(),
+        action: 'build_dom_tree',
+        params: input,
+        context: {
+          url: input.url,
+          title: '',
+          tabId: input.tabId,
+          screenshot: null,
+        },
+        result: { success: true, error: null, extractedContent: '[DOM tree built]' },
+      });
+      return new ActionResult({
+        extractedContent: '[DOM tree built]',
+        includeInMemory: false,
+        // 可根据需要返回 elementTree/selectorMap
+        domTree: elementTree,
+        selectorMap: selectorMap,
+      });
+    }, buildDomTreeActionSchema);
+    actions.push(buildDomTree);
 
     return actions;
   }

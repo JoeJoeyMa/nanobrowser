@@ -11,4 +11,13 @@ if (!fs.existsSync(src)) {
 }
 if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
 fs.copyFileSync(src, dest);
-console.log('Copied content script to chrome-extension/content/index.iife.js'); 
+console.log('Copied content script to chrome-extension/content/index.iife.js');
+
+const buildDomTreeSrc = path.resolve(__dirname, 'chrome-extension/public/buildDomTree.js');
+const buildDomTreeDest = path.join(destDir, 'buildDomTree.js');
+if (!fs.existsSync(buildDomTreeSrc)) {
+  console.error('buildDomTree.js 源文件不存在:', buildDomTreeSrc);
+  process.exit(1);
+}
+fs.copyFileSync(buildDomTreeSrc, buildDomTreeDest);
+console.log('Copied buildDomTree.js to chrome-extension/content/buildDomTree.js'); 

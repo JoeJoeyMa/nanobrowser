@@ -195,3 +195,17 @@ export const waitActionSchema: ActionSchema = {
     seconds: z.number().int().default(3).describe('amount of seconds'),
   }),
 };
+
+export const buildDomTreeActionSchema: ActionSchema = {
+  name: 'build_dom_tree',
+  description: 'Build the DOM tree of the current page for analysis or visualization',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    tabId: z.number().int().describe('id of the tab'),
+    url: z.string().describe('url of the page'),
+    showHighlightElements: z.boolean().default(true).describe('whether to show highlight elements'),
+    focusElement: z.number().int().default(-1).describe('element to focus on'),
+    viewportExpansion: z.number().int().default(0).describe('viewport expansion'),
+    debugMode: z.boolean().optional().describe('enable debug mode'),
+  }),
+};

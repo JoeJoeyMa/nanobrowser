@@ -95,7 +95,7 @@ export async function getClickableElements(
   return { elementTree, selectorMap };
 }
 
-async function _buildDomTree(
+export async function _buildDomTree(
   tabId: number,
   url: string,
   showHighlightElements = true,

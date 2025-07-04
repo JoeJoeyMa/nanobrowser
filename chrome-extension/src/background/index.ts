@@ -83,11 +83,33 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 logger.info('background loaded');
 
-// Listen for simple messages (e.g., from options page)
-chrome.runtime.onMessage.addListener(() => {
-  // Handle other message types if needed in the future
-  // Return false if response is not sent asynchronously
-  // return false;
+// Listen for messages from content scripts
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'user_action_recorded' && currentExecutor) {
+    currentExecutor.handleUserAction(message.data);
+    // Send response to indicate successful handling
+    if (sendResponse) {
+      sendResponse({ success: true });
+    }
+    return true; // Keep the message channel open for async response
+  }
+
+  // Handle export recorded logs request directly
+  if (message.type === 'export_recorded_logs' && currentExecutor) {
+    try {
+      const history = currentExecutor.getRecordedHistory();
+      sendResponse({ type: 'export_result', data: history });
+    } catch (error) {
+      logger.error('Error exporting recorded logs:', error);
+      sendResponse({
+        type: 'export_result',
+        error: error instanceof Error ? error.message : 'Failed to export recorded logs',
+      });
+    }
+    return true; // Keep the message channel open for async response
+  }
+
+  return false; // Not handled, allow other listeners to process
 });
 
 // Setup connection listener for long-lived connections (e.g., side panel)
@@ -104,15 +126,20 @@ chrome.runtime.onConnect.addListener(port => {
             break;
 
           case 'new_task': {
-            if (!message.task) return port.postMessage({ type: 'error', error: 'No task provided' });
+            if (!message.task && message.mode !== 'record')
+              return port.postMessage({ type: 'error', error: 'No task provided' });
             if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
 
-            logger.info('new_task', message.tabId, message.task);
-            currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
+            logger.info('new_task', message.tabId, message.task, message.mode);
+            currentExecutor = await setupExecutor(message.taskId, message.task || 'User Recording', browserContext);
             subscribeToExecutorEvents(currentExecutor);
 
-            const result = await currentExecutor.execute();
-            logger.info('new_task execution result', message.tabId, result);
+            if (message.mode === 'record') {
+              await currentExecutor.startRecording();
+            } else {
+              const result = await currentExecutor.execute();
+              logger.info('new_task execution result', message.tabId, result);
+            }
             break;
           }
           case 'follow_up_task': {
@@ -152,6 +179,33 @@ chrome.runtime.onConnect.addListener(port => {
             if (!currentExecutor) return port.postMessage({ type: 'error', error: 'No task to pause' });
             await currentExecutor.pause();
             return port.postMessage({ type: 'success' });
+          }
+
+          case 'stop_task': {
+            if (currentExecutor) {
+              await currentExecutor.cancel();
+              currentExecutor = null;
+            }
+            port.postMessage({ type: 'task_stopped' });
+            break;
+          }
+
+          case 'export_recorded_logs': {
+            if (!currentExecutor) {
+              port.postMessage({ type: 'export_result', error: 'No active recording to export' });
+              return;
+            }
+            try {
+              const history = currentExecutor.getRecordedHistory();
+              port.postMessage({ type: 'export_result', data: history });
+            } catch (error) {
+              logger.error('Error exporting recorded logs:', error);
+              port.postMessage({
+                type: 'export_result',
+                error: error instanceof Error ? error.message : 'Failed to export recorded logs',
+              });
+            }
+            break;
           }
 
           case 'screenshot': {
@@ -251,6 +305,17 @@ chrome.runtime.onConnect.addListener(port => {
             break;
           }
 
+          case 'user_action_recorded': {
+            if (!currentExecutor) return port.postMessage({ type: 'error', error: 'No executor available' });
+            await currentExecutor.handleUserAction(message.data);
+            break;
+          }
+          case 'export_recorded_logs': {
+            if (!currentExecutor) return port.postMessage({ type: 'error', error: 'No executor available' });
+            const history = await currentExecutor.getRecordedHistory();
+            port.postMessage({ type: 'export_result', logs: history });
+            break;
+          }
           default:
             return port.postMessage({ type: 'error', error: 'Unknown message type' });
         }

@@ -38,6 +38,8 @@ const SidePanel = () => {
   const [isReplaying, setIsReplaying] = useState(false);
   const [isRecordingManual, setIsRecordingManual] = useState(false);
   const [recordedLogs, setRecordedLogs] = useState<any[]>([]);
+  const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
+  const [currentTabId, setCurrentTabId] = useState<number | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
@@ -1006,77 +1008,121 @@ const SidePanel = () => {
     }
   };
 
-  // 注入内容脚本并发送录制控制消息
-  const sendRecorderToggle = async (enabled: boolean) => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['content/index.iife.js'],
-    });
-    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled });
-  };
-
-  // 开始录制
+  // 手动录制控制函数
   const handleStartRecording = async () => {
-    setIsRecordingManual(true);
-    setRecordedLogs([]);
-    // 注入内容脚本并开启录制
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['content/index.iife.js'],
-    });
-    window.addEventListener('message', handleRecorderLogEvent);
-    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled: true });
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab found.');
+
+      // Update UI state
+      setInputEnabled(false);
+      setShowStopButton(true);
+      setIsRecordingManual(true);
+
+      const newSession = await chatHistoryStore.createSession(`录制会话: ${new Date().toLocaleString()}`);
+      setCurrentSessionId(newSession.id);
+      sessionIdRef.current = newSession.id;
+      setRecordingSessionId(newSession.id);
+      setCurrentTabId(tab.id);
+
+      // Display start message in sidebar
+      setMessages([]);
+      appendMessage({ actor: Actors.SYSTEM, content: '录制已开始。您在页面上的操作将被记录。', timestamp: Date.now() });
+
+      // Ensure connection to background script is established
+      if (!portRef.current) {
+        setupConnection();
+      }
+
+      // Send special task message with 'record' mode flag
+      sendMessage({
+        type: 'new_task',
+        task: '用户手动录制会话',
+        taskId: newSession.id,
+        tabId: tab.id,
+        mode: 'record',
+      });
+    } catch (err) {
+      console.error('启动录制失败:', err);
+      setError('Failed to start recording');
+      setInputEnabled(true);
+      setShowStopButton(false);
+      setIsRecordingManual(false);
+    }
   };
 
-  // 停止录制
   const handleStopRecording = async () => {
-    setIsRecordingManual(false);
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
-    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_TOGGLE', enabled: false });
-    window.removeEventListener('message', handleRecorderLogEvent);
+    try {
+      portRef.current?.postMessage({
+        type: 'cancel_task',
+      });
+      setInputEnabled(true);
+      setShowStopButton(false);
+      setIsRecordingManual(false);
+      appendMessage({ actor: Actors.SYSTEM, content: '录制已停止。您可以导出录制日志。', timestamp: Date.now() });
+    } catch (err) {
+      console.error('停止录制失败:', err);
+      setError('Failed to stop recording');
+    }
   };
 
-  // 导出录制日志
   const handleExportRecordedLogs = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
-    // 请求内容脚本导出日志
-    window.addEventListener('message', handleRecorderExportResult);
-    await chrome.tabs.sendMessage(tab.id, { type: 'NANO_RECORDER_EXPORT' });
+    if (!recordingSessionId) {
+      setError('No recording session available to export');
+      return;
+    }
+
+    try {
+      // Send message to background script to get recorded logs
+      const response = await new Promise<any>(resolve => {
+        chrome.runtime.sendMessage(
+          {
+            type: 'export_recorded_logs',
+            taskId: recordingSessionId,
+          },
+          resolve,
+        );
+      });
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      if (!response.data) {
+        throw new Error('No recorded data available');
+      }
+
+      // Create a download link for the logs
+      const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' });
+      const filename = `nanobrowser-recording-${recordingSessionId}.json`;
+      saveAs(blob, filename);
+
+      // Show success message
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: `录制日志已成功导出为 ${filename}`,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      console.error('导出录制日志失败:', err);
+      setError('Failed to export recording. Please try again.');
+    }
   };
 
-  // 监听内容脚本日志事件
-  const handleRecorderLogEvent = (event: MessageEvent) => {
+  // Add debugging for recording events
+  const handleRecordingEvent = useCallback((event: MessageEvent) => {
     if (event.data && event.data.type === 'NANO_RECORDER_LOG') {
+      console.log('Received recording event:', event.data.log);
       setRecordedLogs(prev => [...prev, event.data.log]);
     }
-  };
-
-  // 监听内容脚本导出结果
-  const handleRecorderExportResult = (event: MessageEvent) => {
-    if (event.data && event.data.type === 'NANO_RECORDER_EXPORT_RESULT') {
-      const pretty = JSON.stringify(event.data.logs, null, 2);
-      const blob = new Blob([pretty], { type: 'application/json' });
-      saveAs(blob, `manual_operation_logs.json`);
-    }
-  };
+  }, []);
 
   useEffect(() => {
-    function handleExportResult(msg) {
-      if (msg && msg.type === 'NANO_RECORDER_EXPORT_RESULT') {
-        const pretty = JSON.stringify(msg.logs, null, 2);
-        const blob = new Blob([pretty], { type: 'application/json' });
-        saveAs(blob, `manual_operation_logs.json`);
-      }
+    if (isRecordingManual) {
+      window.addEventListener('message', handleRecordingEvent);
+      return () => window.removeEventListener('message', handleRecordingEvent);
     }
-    chrome.runtime.onMessage.addListener(handleExportResult);
-    return () => chrome.runtime.onMessage.removeListener(handleExportResult);
-  }, []);
+  }, [isRecordingManual, handleRecordingEvent]);
 
   return (
     <div>

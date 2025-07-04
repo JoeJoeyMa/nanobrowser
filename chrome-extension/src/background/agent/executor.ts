@@ -41,6 +41,8 @@ export class Executor {
   private readonly navigatorPrompt: NavigatorPrompt;
   private readonly validatorPrompt: ValidatorPrompt;
   private tasks: string[] = [];
+  private isRecording = false;
+
   constructor(
     task: string,
     taskId: string,
@@ -92,6 +94,13 @@ export class Executor {
     this.context = context;
     // Initialize message history
     this.context.messageManager.initTaskMessages(this.navigatorPrompt.getSystemMessage(), task);
+
+    // 添加标签页更新监听器以处理页面导航
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      if (this.isRecording && changeInfo.status === 'complete') {
+        this.handleTabUpdate(tabId);
+      }
+    });
   }
 
   subscribeExecutionEvents(callback: EventCallback): void {
@@ -299,7 +308,17 @@ export class Executor {
   }
 
   async cancel(): Promise<void> {
-    this.context.stop();
+    if (this.isRecording) {
+      this.isRecording = false;
+      // Notify content script to detach event listeners
+      await this.context.browserContext.sendMessageToTab({
+        type: 'DETACH_RECORDER_LISTENERS',
+        taskId: this.context.taskId,
+      });
+      await this.cleanup();
+    } else {
+      this.context.stop();
+    }
   }
 
   async resume(): Promise<void> {
@@ -394,5 +413,93 @@ export class Executor {
     }
 
     return results;
+  }
+
+  public async startRecording(): Promise<void> {
+    this.isRecording = true;
+    this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_START, this.context.taskId);
+
+    // Get the current page and attach debugger
+    const page = await this.context.browserContext.getCurrentPage();
+
+    // Initial DOM analysis
+    await page.getState(this.context.options.useVision);
+
+    // Notify content script to attach event listeners
+    await this.context.browserContext.sendMessageToTab({
+      type: 'ATTACH_RECORDER_LISTENERS',
+      taskId: this.context.taskId,
+    });
+  }
+
+  public async handleUserAction(data: { action: string; targetInfo: any }): Promise<void> {
+    if (!this.isRecording) return;
+
+    console.log('Received user action:', data);
+
+    // Create a simple action result
+    const actionResult: ActionResult = {
+      success: true,
+      error: null,
+      data: {
+        action: data.action,
+        target: data.targetInfo,
+        timestamp: Date.now(),
+      },
+    };
+
+    // Create a mock model output
+    const modelOutputString = JSON.stringify({
+      action: data.action,
+      target: data.targetInfo,
+      reasoning: 'User performed action',
+    });
+
+    // Get current browser state
+    const page = await this.context.browserContext.getCurrentPage();
+    const browserState = await page.getState(this.context.options.useVision);
+
+    // Create a new step record
+    const stepRecord = {
+      step: this.context.history.history.length + 1,
+      action: data.action,
+      target: data.targetInfo,
+      result: actionResult,
+      browserState,
+      timestamp: Date.now(),
+    };
+
+    console.log('Adding step to history:', stepRecord);
+
+    // Add to history
+    this.context.history.addStep(stepRecord);
+
+    // Emit step event
+    this.context.emitEvent(Actors.USER, ExecutionState.STEP_OK, this.context.taskId, {
+      step: stepRecord.step,
+      action: stepRecord.action,
+      result: stepRecord.result,
+    });
+
+    // Update the browser state to refresh highlights
+    await page.getState(this.context.options.useVision);
+  }
+
+  public async handleTabUpdate(tabId: number): Promise<void> {
+    if (!this.isRecording) return;
+
+    // Re-attach listeners to the updated tab
+    await this.context.browserContext.sendMessageToTab({
+      type: 'ATTACH_RECORDER_LISTENERS',
+      taskId: this.context.taskId,
+    });
+
+    // Get the current page and ensure debugger is attached
+    const page = await this.context.browserContext.getCurrentPage();
+    await page.getState(this.context.options.useVision);
+  }
+
+  public getRecordedHistory(): any[] {
+    return this.context.history.history;
   }
 }

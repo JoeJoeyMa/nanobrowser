@@ -21,9 +21,9 @@ chrome.storage.local.get('nanoRecorderLogs', result => {
 (function ensureBuildDomTreeInjected() {
   if (typeof (window as any).buildDomTree !== 'function') {
     const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('content/buildDomTree.js');
+    script.src = chrome.runtime.getURL('buildDomTree.js');
     script.onload = () => script.remove();
-    document.documentElement.appendChild(script);
+    (document.head || document.documentElement).appendChild(script);
   }
 })();
 

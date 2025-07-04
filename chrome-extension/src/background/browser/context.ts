@@ -63,6 +63,25 @@ export default class BrowserContext {
     this._currentTabId = null;
   }
 
+  /**
+   * Send a message to the content script in the current tab
+   * @param message The message to send
+   * @returns Promise that resolves when the message is sent
+   */
+  public async sendMessageToTab(message: any): Promise<void> {
+    const currentPage = await this.getCurrentPage();
+    if (!currentPage) {
+      throw new Error('No active page to send message to');
+    }
+
+    try {
+      await chrome.tabs.sendMessage(currentPage.tabId, message);
+    } catch (error) {
+      logger.error('Failed to send message to tab:', error);
+      throw error;
+    }
+  }
+
   public async attachPage(page: Page): Promise<boolean> {
     // check if page is already attached
     if (this._attachedPages.has(page.tabId)) {
